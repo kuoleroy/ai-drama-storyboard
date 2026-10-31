@@ -24,21 +24,90 @@ agent_created: true
 # 1. 体检：查结构、时间码、空段、粘连、重复、跨镜引用
 python3 scripts/audit_storyboard.py <分镜稿.txt>
 
-# 2. 机械修复：括号归一、拆粘连、补空段、时间码接续、去跨镜引用
+# 2. 通用性体检：查段长是否落在各平台安全区（<4 秒会被拒收）
+python3 scripts/export_for_api.py <分镜稿.txt> --check
+
+# 3. 机械修复：括号归一、拆粘连、补空段、时间码接续、去跨镜引用
 python3 scripts/fix_storyboard.py <分镜稿.txt> [--dry]
 
-# 3. 生成投喂栏（每镜自足）
+# 4. 生成投喂栏（每镜自足）
 python3 scripts/build_feed_prompts.py <分镜稿.txt> -o <输出.txt> [--mode append|separate]
 
-# 4. 回归自检
+# 5. 导出各家 API 的调用包（一稿多平台）
+python3 scripts/export_for_api.py <分镜稿.txt> --platform kling,veo,seedance -o ./api_export
+python3 scripts/export_for_api.py <分镜稿.txt> --platform all -o ./api_export
+
+# 6. 回归自检
 python3 scripts/selftest.py
+python3 scripts/e2e_test.py <分镜稿.txt>
 ```
 
 `fix_storyboard.py` 与 `build_feed_prompts.py` 都会先备份原文件。**任何情况下都不要用 `open(path, "w")` 直接改源文件** —— 编码名写错会让 `"w"` 模式先清空再抛异常，源文件就没了。
 
-## 七条铁律
+## 平台适配速查
 
-这七条是本技能的判断依据，冲突时按此排序取舍。
+| key | 平台 | 时长 | 画幅 | 原生音频 | 备注 |
+|---|---|---|---|---|---|
+| `kling` | 可灵 2.6 / o1 | 5 / 10s | 9:16 | ✅ | 参考图+主体 ≤7 |
+| `seedance` | Seedance 2.0/2.5 | 4–15 / 4–30s | 9:16 | ✅ | 支持末帧回传 |
+| `veo` | Veo 3 | 4 / 8s | 9:16 | ✅ | Vertex AI |
+| `runway` | Runway Gen-4 | 5–10s | 9:16 | ❌ | 运镜控制最强 |
+| `sora` | Sora 2 | 10–20s | 9:16 | ✅ | 角色记忆好 |
+| `wan` | Wan 2.6 | 2–10s | 9:16 | ❌ | size 写 `1080*1920` |
+| `hailuo` | 海螺 | 5–10s | 9:16 | ❌ | 跨镜一致性较好 |
+| `luma` | Luma Ray 2 | 5–10s | 9:16 | ❌ | |
+| `generic` | 通用基线 | 5 / 10s | 9:16 | ✅ | OpenAI 兼容端点 |
+
+导出产物（每平台一个目录）：
+```
+kling/
+├── manifest.json     调用清单（含 params / prompt / 首帧续写链 / 使用说明）
+├── prompts.txt        人读的逐段提示词
+└── segments/          每段一个 txt，方便逐个复制粘贴
+```
+
+
+## 八条铁律
+
+这八条是本技能的判断依据，冲突时按此排序取舍。
+
+### 0. 通用性优先（先于一切内容判断）
+
+**同一份分镜稿要能喂遍各家 API**，所以写稿阶段就必须满足所有平台的交集，不能只顾一家。
+
+**硬约束：段长 4–10 秒，5 秒与 10 秒是全平台共同档位。**
+
+| 平台 | 单次生成时长 |
+|---|---|
+| 可灵 2.6 / o1 | 5 / 10 秒 |
+| Seedance 2.0 / 2.5 | 4–15 / 4–30 秒 |
+| Veo 3 | 4 / 8 秒 |
+| Runway Gen-4 | 5–10 秒 |
+| Sora 2 | 10–20 秒 |
+| Wan 2.6 | 2–10 秒 |
+| 海螺 / Luma | 5–10 秒 |
+
+> ⚠️ **段长 < 4 秒会被 Veo 3 / Seedance 2.0 / Wan 直接拒收（HTTP 400）。**
+
+**这决定了原稿的段数怎么定**：
+
+| 原稿形态 | 常见段长 | 是否通用 | 改法 |
+|---|---|---|---|
+| 15 秒/镜、4 段 | 3–5 秒 | ⚠️ 偏短 | 合并为 **2 段（10 + 5）** |
+| 30 秒/镜、8 段 | 3–4 秒 | ❌ 不可用 | 合并为 **3 段（10 + 10 + 10）** |
+| 15 秒/镜、3 段 | 4–6 秒 | ✅ 可用 | 不用改 |
+
+**写稿时就按这个粒度定段**，不要等生成时才发现段长不对。
+
+**其余通用基线**（详见 `references/api_compat.md`）：
+- 画幅：**9:16**（全平台交集，竖屏短剧无争议）
+- 分辨率：1080×1920（或 720×1280 求覆盖全部平台）
+- 参考图：**≤ 5 张**（Wan 的图+视频合计上限是最大约束），只放角色三视图 + 场景图，**不放道具图**
+- 负向约束：**写两遍** —— 独立 `negative_prompt` 字段 + prompt 末尾内嵌（可灵不支持独立字段）
+- 台词：**用引号包住**（可灵/Veo/Seedance/Sora 会据此生成口型同步）
+- 首帧续写：**几乎所有平台都支持**，是逐镜流水线里唯一可靠的"记忆"
+
+**流程**：写完稿先跑 `export_for_api.py --check`，看段长是否落在安全区；再用 `--platform <平台>` 导出各家的实际调用参数。
 
 ### 1. 每镜自足（最重要）
 
@@ -173,6 +242,7 @@ AI 最常见的失效是"推拉摇移很热闹，人却钉在原地"。每段必
 
 ## 参考资料
 
+- `references/api_compat.md` —— **各平台能力矩阵与通用基线**（时长/画幅/分辨率/参考图/音频/字段名差异）
 - `references/field_spec.md` —— 各栏位的写法规范、格式约定、投喂栏说明
 - `references/pitfalls.md` —— 踩坑详解与修复手法
 - `references/script_review.md` —— 剧本审核指令模板（接续/站位/剧情/节奏/合规五维）

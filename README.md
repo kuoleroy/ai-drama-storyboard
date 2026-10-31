@@ -10,6 +10,7 @@
 
 | 症状 | 根因 | 本技能的做法 |
 |---|---|---|
+| **某平台直接报错 400** | 段长 <4 秒（Veo3/Seedance2.0/Wan 的下限） | 体检 + 按平台档位自动重切段 |
 | 导入工具多算一个分镜 | 正文里有 `{分镜052（…）}` 这种带花括号的交叉引用 | 去花括号 + 去镜号，改成"前文的…" |
 | 画面描述被当成台词念出来 | 运镜头粘在了台词行尾部 | 自动拆回独立行 |
 | 生成"只转镜头、人不动" | 运镜段正文为空 + 没有主体位移 | 补空段正文；每段加主体位移 + 镜头跟随 |
@@ -21,11 +22,59 @@
 
 ---
 
+## 通用性：一稿喂遍各家 API
+
+这是本技能最核心的约束 —— **同一份分镜稿要能喂遍可灵、Seedance、Veo、Runway、Sora、Wan、海螺、Luma**。
+
+各家单次生成时长：
+
+| 平台 | 时长 | 画幅 | 原生音频 |
+|---|---|---|---|
+| 可灵 2.6 / o1 | **5 / 10 秒** | 9:16 | ✅ |
+| Seedance 2.0 / 2.5 | **4–15 / 4–30 秒** | 9:16 | ✅ |
+| Veo 3 | **4 / 8 秒** | 9:16 | ✅ |
+| Runway Gen-4 | **5–10 秒** | 9:16 | ❌ |
+| Sora 2 | **10–20 秒** | 9:16 | ✅ |
+| Wan 2.6 | **2–10 秒** | 9:16 | ❌ |
+| 海螺 / Luma | **5–10 秒** | 9:16 | ❌ |
+
+**通用交集：段长 4–10 秒，5 秒与 10 秒是全平台共同档位，9:16 是全平台共同画幅。**
+
+> ⚠️ 段长 < 4 秒会被 Veo 3 / Seedance 2.0 / Wan 直接拒收。
+
+所以 15 秒/镜应该切成 **2 段（10+5）**，30 秒/镜切成 **3 段（10+10+10）**，
+而不是常见写法的 15 秒 4 段、30 秒 8 段。
+
+导出器会自动按目标平台的档位重切，并抹平字段名差异：
+
+```bash
+python3 scripts/export_for_api.py 分镜稿.txt --platform all -o ./api_export
+```
+
+```
+api_export/
+├── kling/
+│   ├── manifest.json    调用清单：params + prompt + 首帧续写链 + 使用说明
+│   ├── prompts.txt       人读的逐段提示词
+│   └── segments/         每段一个 txt
+├── veo/
+├── seedance/
+└── ...
+```
+
+字段名差异（`duration` vs `seconds` vs `duration_seconds`、`size` 写 `1080*1920`、
+参考图字段 `refer_image` / `images` / `reference_urls`）由适配层统一处理。
+
+---
+
 ## 快速开始
 
 ```bash
-# 体检
+# 体检（结构、时间码、空段、粘连、重复、跨镜引用）
 python3 scripts/audit_storyboard.py 分镜稿.txt
+
+# 通用性体检（段长是否落在各平台安全区）
+python3 scripts/export_for_api.py 分镜稿.txt --check
 
 # 机械修复（先自动备份）
 python3 scripts/fix_storyboard.py 分镜稿.txt [--dry]
@@ -33,8 +82,12 @@ python3 scripts/fix_storyboard.py 分镜稿.txt [--dry]
 # 生成投喂版
 python3 scripts/build_feed_prompts.py 分镜稿.txt -o 输出.txt
 
+# 导出各家 API 调用包
+python3 scripts/export_for_api.py 分镜稿.txt --platform kling,veo,seedance -o ./api_export
+
 # 回归自检
 python3 scripts/selftest.py
+python3 scripts/e2e_test.py 分镜稿.txt
 ```
 
 也可以直接把技能装进 WorkBuddy：
@@ -49,8 +102,9 @@ WorkBuddy → 设置 → 技能 → 添加本地技能 → 选 ai-drama-storyboa
 
 ```
 ai-drama-storyboard/
-├── SKILL.md                          核心方法论（七条铁律）
+├── SKILL.md                          核心方法论（八条铁律）
 ├── references/
+│   ├── api_compat.md                 各平台能力矩阵与通用基线 ★
 │   ├── field_spec.md                 各栏位写法规范
 │   ├── pitfalls.md                   踩坑详解（症状→根因→修法）
 │   ├── script_review.md              剧本审核指令模板（五维）
@@ -60,15 +114,17 @@ ai-drama-storyboard/
 │   ├── audit_storyboard.py           体检器（10 项检查）
 │   ├── fix_storyboard.py             机械修复器
 │   ├── build_feed_prompts.py         投喂栏生成器
-│   └── selftest.py                   回归自检
+│   ├── export_for_api.py             多平台适配导出器 ★
+│   ├── selftest.py / e2e_test.py     回归与端到端测试
 └── assets/
     └── sample_shot_block.txt         单镜完整样例（可照抄）
 ```
 
 ---
 
-## 七条铁律（摘要）
+## 八条铁律（摘要）
 
+0. **通用性优先** —— 段长 4–10 秒、9:16、参考图 ≤5、负向写两遍、台词加引号
 1. **每镜自足** —— 只写本镜看得见的内容，禁止跨镜指代
 2. **外观放权，状态锁死** —— 道具外观交给 AI，只锁开合/持有者/位置
 3. **纸面文字一律模糊化** —— 关键信息由台词交付
