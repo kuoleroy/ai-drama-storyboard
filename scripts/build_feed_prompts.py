@@ -184,12 +184,6 @@ def build_shot_block(num, sec, block, opts):
         out.append("【场景】" + scene_line + (" ｜ 时段：" + "→".join(tm[:2]) if tm else ""))
     if light and not already("【光线】"):
         out.append("【光线】" + light)
-    if not already("【参考图】"):
-        ref = []
-        if all_names:
-            ref.append("角色三视图：" + "、".join(all_names))
-        ref.append("场景图：见【场景】")
-        out.append("【参考图】" + "；".join(ref))
 
     # 道具状态：优先复用原文件已有的【道具状态】栏；否则从起始/结束状态里抽
     existing_prop = field(body, "【道具状态】")
@@ -266,13 +260,22 @@ def main():
             out[ti + 1:ti + 1] = ins
         result = out
     else:
-        # 独立模式：每镜输出一个完整块
+        # 独立模式：全局说明保留多行在前；每镜输出为单行块（分镜内不换行），分镜间空一行
         result = []
-        for num, sec, block in shots:
-            result.append("{分镜%03d｜%s秒}" % (num, sec if sec else "?"))
-            result.extend(build_shot_block(num, sec, block, {}))
-            result.extend(block[1:])
+        if titles:
+            first_idx = titles[0][2]
+            gpart = lines[:first_idx]
+            while gpart and not gpart[-1].strip():
+                gpart.pop()
+            result.extend(gpart)
             result.append("")
+        for num, sec, block in shots:
+            parts = ["{分镜%03d｜%s秒}" % (num, sec if sec else "?")]
+            parts += build_shot_block(num, sec, block, {})
+            parts += [l for l in block[1:] if l.strip()]
+            line = " ".join(p.strip() for p in parts if p.strip())
+            result.append(line)
+            result.append("")  # 分镜与分镜之间空一行
 
     dst = args.output or (args.src if args.mode == "append" else
                            os.path.splitext(args.src)[0] + "_投喂版.txt")
