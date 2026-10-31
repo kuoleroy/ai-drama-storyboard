@@ -76,6 +76,9 @@ python3 scripts/check_handoff.py 稿子.txt --shots 130 --sec 15
 # 体检（结构、时间码、空段、粘连、重复、跨镜引用）
 python3 scripts/audit_storyboard.py 稿子.txt
 
+# 语义重复（换词再问、换人解释同一事实、承诺复读）
+python3 scripts/audit_repetition.py 稿子.txt
+
 # 通用性体检（段长是否落在各平台安全区）
 python3 scripts/export_for_api.py 稿子.txt --check
 
@@ -109,7 +112,9 @@ WorkBuddy → 设置 → 技能 → 添加本地技能 → 选 ai-drama-storyboa
   ↓  交付锁稿清单 + 不可改动项清单
 分镜稿
   ↓  audit_storyboard.py                      ← 体检（空段/粘连/重复/跨镜引用）
-  ↓  fix_storyboard.py                        ← 机械修复
+  ↓  audit_repetition.py                      ← 语义重复（换词再问/换人解释/承诺复读）
+  ↓  人工通读（剧情完整性、语义重复必须靠人）
+  ↓  fix_storyboard.py                        ← 机械修复（保留原格式）
   ↓  build_feed_prompts.py                    ← 每镜自足
 投喂稿
   ↓  export_for_api.py --check                ← 通用性体检（段长合规）
@@ -126,26 +131,28 @@ ai-drama-storyboard/
 ├── SKILL.md                          核心方法论（九条铁律）
 ├── references/
 │   ├── handoff_spec.md               剧本→分镜交接规范（锁稿核验）★
+│   ├── script_review.md              分镜稿审核与原格式修订规范 ★
 │   ├── api_compat.md                 各平台能力矩阵与通用基线 ★
 │   ├── field_spec.md                 各栏位写法规范
 │   ├── pitfalls.md                   踩坑详解（症状→根因→修法）
-│   ├── script_review.md              剧本审核指令模板（五维）
 │   └── creative_review.md            爽点评估与改造方法论
 ├── scripts/
 │   ├── shotparse.py                  解析/写回公共库
 │   ├── check_handoff.py              锁稿核验器 ★
 │   ├── audit_storyboard.py           体检器（10 项检查）
+│   ├── audit_repetition.py           语义重复检测器 ★
 │   ├── fix_storyboard.py             机械修复器
 │   ├── build_feed_prompts.py         投喂栏生成器
 │   ├── export_for_api.py             多平台适配导出器 ★
 │   ├── selftest.py / e2e_test.py     回归与端到端测试
 └── assets/
-    └── sample_shot_block.txt         单镜完整样例（可照抄）
+    ├── sample_shot_block.txt         单镜完整样例（可照抄）
+    └── 剧本分镜审核指令_原文.txt       审核指令原文（可直接复制使用）
 ```
 
 ---
 
-## 九条铁律（摘要）
+## 十条铁律（摘要）
 
 0. **通用性优先** —— 段长 4–10 秒、9:16、参考图 ≤5、负向写两遍、台词加引号
 1. **每镜自足** —— 只写本镜看得见的内容，禁止跨镜指代
@@ -156,6 +163,7 @@ ai-drama-storyboard/
 6. **剧情爽 ≠ 打斗爽** —— 逐镜流水线做不了打斗
 7. **静态化一切高难度动作** —— 信息压迫比动作威胁更抓人
 8. **交接前先锁稿** —— 时长撑不撑得住？分镜阶段无创作权限
+9. **审核只改有依据的问题，且不改原格式** —— 最小文字修改，格式全保留
 
 完整解释见 `SKILL.md`。
 
