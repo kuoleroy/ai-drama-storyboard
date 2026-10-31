@@ -168,6 +168,10 @@ NEGATIVE = (
     "脸部特征漂移、服装变化、场景陈设突变"
 )
 
+# 行业铁律：单条 prompt 别超过 80–100 词，超过会让模型困惑、输出变糊。
+# 中文按字符计，约 100–120 字是安全上限（≈80 英文词的语义量）。
+CORE_LIMIT = 120
+
 
 def pick_duration(target, platform):
     """为一段挑选最接近的合法时长档位。"""
@@ -289,34 +293,112 @@ def regroup_segments(segs, platform):
     return out
 
 
+def strip_meta(body):
+    """把运镜正文拆成「纯画面描述」与「镜头说明」两部分。
+
+    行业通行做法：prompt 只写画面，镜头术语可留但要精简。
+    这里把"镜头…"引导的句子摘出来单独放，避免核心层被镜头术语挤占。
+    """
+    body = (body or "").strip()
+    if not body:
+        return "", ""
+    # 去掉"可见人物N人（…）"这类元标注
+    body = re.sub(r"可见人物\d+人[（(][^）)]*[）)]?[，,]?", "", body)
+    sents = [s.strip() for s in re.split(r"[。；;]", body) if s.strip()]
+    visual, camera = [], []
+    for s in sents:
+        # 含镜头运动语词的句子归入镜头层
+        if re.search(r"(镜头|运镜|画面|构图|景别|推近|拉远|横移|摇|跟|固定机位|俯拍|特写|近景|中景|全景)", s):
+            camera.append(s)
+        else:
+            visual.append(s)
+    return "。".join(visual), "。".join(camera)
+
+
+def compress(text, limit):
+    """在 limit 字以内截断，优先在句号处断，不丢句子主干。"""
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    for sep in ("。", "；", "，"):
+        i = cut.rfind(sep)
+        if i > limit * 0.5:
+            return cut[:i + 1]
+    return cut
+
+
 def build_prompt(shot_meta, group, platform):
-    """把一组原始运镜段拼成该平台的 prompt 文本。"""
-    lines = []
-    for key in ("style_line", "scene_line", "people_line", "light_line"):
-        v = shot_meta.get(key)
-        if v:
-            lines.append(v)
-    # 逐段画面描述（去掉时间码，保留标签+正文）
+    """生成该平台的分层 prompt。
+
+    行业通行铁律：单条 prompt 别超过 80–100 词，超过会让模型困惑、输出变糊。
+    但逐镜流水线要保连续性，光靠核心层不够 —— 所以分两层：
+
+      prompt_core    画面本体（主体+动作+镜头+光线+台词），控制在 ~100 字以内
+      prompt_detail  连续性与约束（空间锚定/道具状态/负面/防重复），按需追加
+
+    prompt_minimal = 只用 core（预算紧、模型对长提示词敏感时用）
+    prompt_full    = core + detail（默认，保证连续性）
+    """
+    # ---------- 核心层 ----------
+    core = []
+    # 风格：取短版（完整版放 detail）
+    style = shot_meta.get("style_line") or ""
+    style_short = compress(style.replace("风格：", "").split("。")[0], 34)
+    if style_short:
+        core.append(style_short + "。")
+    # 场景与人物
+    scene = shot_meta.get("scene_line") or ""
+    people = shot_meta.get("people_line") or ""
+    if people:
+        core.append(people)
+    # 逐段画面描述（画面 + 镜头，精简）
     for s in group["parts"]:
+        visual, camera = strip_meta(s.get("body"))
         tag = s.get("tag") or ""
-        body = (s.get("body") or "").strip()
-        if not body:
-            continue
-        lines.append(("%s：%s" % (tag, body)) if tag else body)
-    # 台词（引号包住 → 触发原生口型同步）
+        piece = "；".join(x for x in [visual, camera] if x)
+        if piece:
+            core.append(("%s：%s" % (tag, piece)) if tag else piece)
+    # 光线
+    light = shot_meta.get("light_line") or ""
+    if light:
+        core.append(light)
+    # 台词（引号包住 → 触发原生口型同步；只有支持原生音频的平台才带）
     dlg = shot_meta.get("dialogue") or []
-    if dlg:
-        lines.append("")
-        lines.append("台词（人物开口，唇形与台词同步；括号内是表演提示，不要念出来）：")
-        for d in dlg:
-            lines.append("  " + d)
-    # 约束
-    lines.append("")
-    lines.append("要求：镜头始终跟随主体运动，主体停下时镜头才停；"
-                 "每段构图与景别互不相同；不要出现上述人物以外的人物与物件；"
-                 "画面内不生成任何文字。")
-    lines.append("避免：" + NEGATIVE)
-    return "\n".join(x for x in lines if x is not None).strip()
+    if dlg and platform.get("audio_native"):
+        core.append("台词（人物开口，唇形同步，括号内不念）：" +
+                    " ".join(dlg))
+    prompt_core = "\n".join(x for x in core if x).strip()
+
+    # 核心层超长时按比例压缩（保画面，优先砍光线与次要段）
+    if len(prompt_core) > CORE_LIMIT:
+        keep = []
+        acc = 0
+        for ln in prompt_core.split("\n"):
+            if acc + len(ln) > CORE_LIMIT and keep:
+                continue
+            keep.append(ln)
+            acc += len(ln)
+        prompt_core = "\n".join(keep)
+
+    # ---------- 详情层 ----------
+    detail = []
+    anchor = shot_meta.get("anchor_line") or ""
+    if anchor:
+        detail.append("空间锚定：" + anchor)
+    props = shot_meta.get("prop_line") or ""
+    if props:
+        detail.append("道具状态：" + props)
+    if style:
+        detail.append("画风细则：" + style)
+    detail.append("要求：镜头始终跟随主体运动，主体停下时镜头才停；"
+                  "每段构图与景别互不相同；"
+                  "不出现上述人物以外的人物与物件；画面内不生成任何文字。")
+    detail.append("避免：" + NEGATIVE)
+    prompt_detail = "\n".join(detail)
+
+    return prompt_core, prompt_detail
 
 
 def shot_meta(block, global_style=None):
@@ -341,6 +423,9 @@ def shot_meta(block, global_style=None):
         style = global_style or ""
     style_line = ("风格：" + style) if style else ""
     light_line = ("光线：" + light) if light else ""
+    # 空间锚定与道具状态（连续性层的关键信息）
+    anchor_line = field(body, "【空间锚定】")
+    prop_line = field(body, "【道具状态】")
 
     # 台词（正文里的"角色（提示）：台词"格式）
     dlg = []
@@ -382,6 +467,8 @@ def shot_meta(block, global_style=None):
         "scene_line": scene_line,
         "style_line": style_line,
         "light_line": light_line,
+        "anchor_line": anchor_line,
+        "prop_line": prop_line,
         "dialogue": dd,
         "refs": ref_list,
         "char_refs": char_refs,
@@ -487,10 +574,14 @@ def export(src, platform_keys, outdir):
             for gi, g in enumerate(groups):
                 total_seg += 1
                 total_dur += g["dur"]
-                prompt = build_prompt(meta, g, plat)
+                core, detail = build_prompt(meta, g, plat)
+                prompt_full = core + "\n" + detail
                 refs = meta["refs"][:plat["max_refs"]]
-                params = platform_params(plat, prompt, NEGATIVE, g["dur"], refs,
+                params = platform_params(plat, prompt_full, NEGATIVE, g["dur"], refs,
                                          seed=1000 + num * 10 + gi)
+                # 另给一份"只含核心层"的参数（模型对长提示词敏感时用）
+                params_min = platform_params(plat, core, NEGATIVE, g["dur"], refs,
+                                             seed=1000 + num * 10 + gi)
                 item = {
                     "id": "%03d-%02d" % (num, gi + 1),
                     "shot": num,
@@ -507,24 +598,57 @@ def export(src, platform_keys, outdir):
                     "reference_images": refs,
                     "first_frame_from": prev_seg_id,   # 首帧续写：取上一段末帧
                     "params": params,
-                    "prompt": prompt,
+                    "params_minimal": params_min,
+                    "prompt_core": core,
+                    "prompt_detail": detail,
+                    "prompt": prompt_full,
+                    "prompt_chars": {"core": len(core), "detail": len(detail),
+                                     "full": len(prompt_full)},
                 }
                 manifest["segments"].append(item)
                 # 首帧续写链
                 prev_seg_id = item["id"]
                 last_frame_of[num] = item["id"]
-                # 单段文件
+                # 单段文件：分层给出
                 fn = "shot%03d_seg%02d_%d-%ds.txt" % (num, gi + 1, g["t1"], g["dur"])
                 with open(os.path.join(segdir, fn), "w", encoding="utf-8") as f:
-                    f.write(prompt + "\n")
+                    f.write("【核心层 prompt_core｜%d 字｜直接喂模型】\n%s\n\n"
+                            "【详情层 prompt_detail｜%d 字｜连续性/约束，按需追加】\n%s\n"
+                            % (len(core), core, len(detail), detail))
                 prompt_lines.append(
-                    "─" * 66 + "\n【%s】分镜%03d 第%d/%d段 ｜ %s ｜ %s ｜ %d秒\n%s"
+                    "─" * 66 + "\n【%s】分镜%03d 第%d/%d段 ｜ %s ｜ %s ｜ %d秒"
+                    " ｜ 核心%d字/全量%d字\n%s"
                     % (item["id"], num, gi + 1, len(groups), item["timecode"],
-                       plat["name"], g["dur"], prompt))
+                       plat["name"], g["dur"], len(core), len(prompt_full), core))
 
         manifest["total_segments"] = total_seg
         manifest["total_seconds"] = total_dur
         manifest["original_seconds"] = sum(sec or 0 for _, sec, _ in shots)
+
+        # 分层投喂说明
+        core_lens = [s["prompt_chars"]["core"] for s in manifest["segments"]]
+        manifest["layered_prompt"] = {
+            "why": ("行业铁律：单条 prompt 别超过 80–100 词，超过会让模型困惑、输出变糊。"
+                    "但逐镜流水线要保连续性，光靠核心层不够 —— 所以分两层。"),
+            "layers": {
+                "prompt_core": ("画面本体（风格+人物+动作+镜头+光线+台词）。"
+                                "直接喂模型。控制在 %d 字以内。" % CORE_LIMIT),
+                "prompt_detail": ("连续性与约束（空间锚定/道具状态/画风细则/负面/防重复）。"
+                                  "预算紧或模型对长提示词敏感时可省略。"),
+            },
+            "usage": {
+                "默认": "用 params（= core + detail），连续性最好",
+                "保守": "用 params_minimal（只用 core），模型对长提示词敏感时用",
+                "逐段文件": "segments/*.txt 已按 core / detail 分节给出",
+            },
+            "core_chars": {
+                "min": min(core_lens) if core_lens else 0,
+                "max": max(core_lens) if core_lens else 0,
+                "avg": round(sum(core_lens) / len(core_lens)) if core_lens else 0,
+                "limit": CORE_LIMIT,
+                "over_limit": sum(1 for x in core_lens if x > CORE_LIMIT),
+            },
+        }
         # 时长守恒说明
         over = manifest["total_seconds"] - manifest["original_seconds"]
         if over > 1:

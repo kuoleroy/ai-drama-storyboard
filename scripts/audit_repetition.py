@@ -61,6 +61,47 @@ def jaccard(a, b):
     return inter / float(len(a | b))
 
 
+def overlap_coef(a, b):
+    """重叠系数 = 交集 / 较小集合。
+
+    短句用 Jaccard 会失真（"慢走，下次记得还。" vs "借你的。下次记得还。"
+    只有 0.44，但共享 4 个字）—— 重叠系数能抓到"共用意图不同措辞"。
+    """
+    if not a or not b:
+        return 0.0
+    return len(a & b) / float(min(len(a), len(b)))
+
+
+def _sim(a, b):
+    """综合相似度：取 Jaccard 与重叠系数的较大值。"""
+    return max(jaccard(a, b), overlap_coef(a, b) * 0.9)
+
+
+# 台词里的"高频功能短语"——同一句式骨架的不同措辞，最典型的重复
+PHRASE_PATTERNS = [
+    ("下次记得还", ["下次记得还", "记得还"]),
+    ("明天还", ["明天还", "明天给你送来", "明天还你", "明天给你送"]),
+    ("路上小心/慢点", ["路上小心", "路上慢点", "慢走", "路上当心"]),
+    ("拿着/给伞", ["拿着", "给伞", "给你伞", "递过"]),
+    ("谢谢", ["谢谢", "多谢", "谢了"]),
+    ("对不起", ["对不起", "抱歉"]),
+    ("你还在吗", ["你还在吗", "你在吗", "你在么"]),
+]
+
+
+def phrase_repeat(dlg):
+    """检测高频功能短语在多镜重复出现（同一句式骨架换措辞）。"""
+    hits = []
+    for label, pats in PHRASE_PATTERNS:
+        matched = []
+        for num, spk, txt in dlg:
+            if any(p in txt for p in pats):
+                matched.append((num, spk, txt))
+        if len(matched) >= 2:
+            hits.append((label, matched))
+    return hits
+
+
 def extract_dialogue_with_shot(shots):
     """返回 [(shot_no, speaker, text)]
 
@@ -148,10 +189,10 @@ def main():
                 key = (spk, a[1], b[1])
                 if key in seen_pairs:
                     continue
-                sim = jaccard(bigrams(a[1]), bigrams(b[1]))
-                if sim >= args.threshold:
+                sc = _sim(bigrams(a[1]), bigrams(b[1]))
+                if sc >= args.threshold:
                     seen_pairs.add(key)
-                    rep_ask.append((sim, spk, a, b))
+                    rep_ask.append((sc, spk, a, b))
     rep_ask.sort(reverse=True, key=lambda x: x[0])
     print("\n【1】换词再问（同一说话人问相似问题，跨镜）")
     if rep_ask:
@@ -164,7 +205,69 @@ def main():
         print("  无")
     findings += [("换词再问", len(rep_ask))]
 
-    # ---- 2. 换人解释同一事实 ----
+    # ---- 2. 台词整体相似（任意两句，不限疑问句）----
+    rep_pair = []
+    seen_pairs = set()
+    for i in range(len(dlg)):
+        for j in range(i + 1, len(dlg)):
+            a, b = dlg[i], dlg[j]
+            if a[0] == b[0]:
+                continue
+            key = (a[2], b[2])
+            if key in seen_pairs:
+                continue
+            s = _sim(bigrams(a[2]), bigrams(b[2]))
+            if s >= args.threshold:
+                seen_pairs.add(key)
+                rep_pair.append((s, a, b))
+    rep_pair.sort(reverse=True, key=lambda x: x[0])
+    print("\n【2】台词整体相似（任意两句台词雷同）")
+    if rep_pair:
+        for s, a, b in rep_pair[:args.top]:
+            print("  ! %.2f  分镜%03d vs %03d" % (s, a[0], b[0]))
+            print("       A: [%s] %s" % (a[1], a[2]))
+            print("       B: [%s] %s" % (b[1], b[2]))
+        print("  共 %d 组疑似" % len(rep_pair))
+    else:
+        print("  无")
+
+    # ---- 3. 高频功能短语（同一句式骨架换措辞 —— 最典型的重复）----
+    ph = phrase_repeat(dlg)
+    print("\n【3】高频功能短语（同一句式骨架在不同镜重复）")
+    if ph:
+        for label, matched in ph:
+            locs = "、".join("分镜%03d「%s」" % (n, t) for n, _, t in matched[:6])
+            print("  ! 「%s」出现 %d 次：%s" % (label, len(matched), locs))
+        print("  注：出现 2 次多为伏笔收束（可接受）；≥3 次为冗余重复，须改。")
+        print("  共 %d 组" % len(ph))
+    else:
+        print("  无")
+    findings += [("高频短语", len([1 for _, m in ph if len(m) >= 3]))]
+
+    # ---- 3b. 纸面文字主动作词（会让 AI 生成乱码，必须改）----
+    print("\n【3b】纸面文字主动作词（提示词在命令 AI 生成文字）")
+    WRITE_ACT = ["写下", "写下一个名字", "写一行字", "写了", "写好", "写着字",
+                 "填写", "题字", "签名", "标注着", "印着字"]
+    paper_hits = []
+    for num, sec, block in shots:
+        for l in block[1:]:
+            ls = l.strip()
+            if not ls.startswith("运镜"):
+                continue
+            for w in WRITE_ACT:
+                if w in ls:
+                    paper_hits.append((num, w, ls[:70]))
+                    break
+    if paper_hits:
+        for num, w, ctx in paper_hits[:12]:
+            print("  ! 分镜%03d 「%s」→ %s" % (num, w, ctx))
+        print("  共 %d 处 —— 只要提示词出现『写下/写一行字』，AI 就会生成乱码文字。" % len(paper_hits))
+        print("  改法：改成『笔尖划过纸面，只留下极淡墨痕，看不出任何字迹』。")
+    else:
+        print("  ✓ 无")
+    findings += [("纸面文字动作", len(paper_hits))]
+
+    # ---- 4. 换人解释同一事实 ----
     by_content = defaultdict(list)
     for num, spk, txt in dlg:
         for key in re.split(r"[，。！？；：…、,.!?;:]", txt):
@@ -188,7 +291,7 @@ def main():
         if len(speakers) >= 2:      # 不同人复述同一事
             rep_explain.append((len(uniq), key, uniq))
     rep_explain.sort(reverse=True, key=lambda x: x[0])
-    print("\n【2】换人解释同一事实（不同角色复述同一信息点）")
+    print("\n【4】换人解释同一事实（不同角色复述同一信息点）")
     if rep_explain:
         for n, key, items in rep_explain[:args.top]:
             locs = "、".join("分镜%03d/%s" % (i[0], i[1]) for i in items[:5])
@@ -209,7 +312,7 @@ def main():
     for num, spk, txt, hits in shock:
         shock_groups[hits[0]].append((num, spk, txt))
     rep_shock = [(k, v) for k, v in shock_groups.items() if len(v) >= 2]
-    print("\n【3】重复震惊（同一情绪词多次出现）")
+    print("\n【5】重复震惊（同一情绪词多次出现）")
     if rep_shock:
         for k, v in rep_shock:
             print("  ! 「%s」×%d：%s" % (k, len(v),
@@ -229,7 +332,7 @@ def main():
                 prom_groups[m].append((num, spk))
                 break
     rep_prom = [(k, v) for k, v in prom_groups.items() if len(v) >= 3]
-    print("\n【4】承诺/保证复读（同一承诺被反复确认）")
+    print("\n【6】承诺/保证复读（同一承诺被反复确认）")
     if rep_prom:
         for k, v in rep_prom:
             print("  ! 「%s」出现 %d 次：%s" % (k, len(v),
@@ -256,7 +359,7 @@ def main():
     rep_stage = [(k, v) for k, v in stage.most_common(5) if v >= 3]
     rep_scene = [(k, v) for k, v in scene.most_common(5) if v >= 3]
     rep_tags = [(k, v) for k, v in tags.most_common(8) if v >= 3]
-    print("\n【5】同句式复读")
+    print("\n【7】同句式复读")
     for name, items, thr in (("表演说明", rep_stage, 3), ("场景栏", rep_scene, 3),
                               ("运镜标签", rep_tags, 3)):
         if items:
