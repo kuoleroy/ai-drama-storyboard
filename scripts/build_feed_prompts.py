@@ -260,21 +260,22 @@ def main():
             out[ti + 1:ti + 1] = ins
         result = out
     else:
-        # 独立模式：全局说明保留多行在前；每镜输出为单行块（分镜内不换行），分镜间空一行
+        # 独立模式：全局说明保留多行在前；每镜内部各栏保持分行（不挤一行），
+        # 但分镜内部不出现空行，分镜与分镜之间空一行
         result = []
         if titles:
-            first_idx = titles[0][2]
+            first_idx = titles[0][0]  # find_titles 返回 (行索引, 镜号, 秒数)，取行索引
             gpart = lines[:first_idx]
             while gpart and not gpart[-1].strip():
                 gpart.pop()
             result.extend(gpart)
             result.append("")
         for num, sec, block in shots:
-            parts = ["{分镜%03d｜%s秒}" % (num, sec if sec else "?")]
-            parts += build_shot_block(num, sec, block, {})
-            parts += [l for l in block[1:] if l.strip()]
-            line = " ".join(p.strip() for p in parts if p.strip())
-            result.append(line)
+            result.append("{分镜%03d｜%s秒}" % (num, sec if sec else "?"))
+            for l in block[1:]:
+                ls = l.strip()
+                if ls:
+                    result.append(ls)  # 分镜内逐行输出，不插入空行
             result.append("")  # 分镜与分镜之间空一行
 
     dst = args.output or (args.src if args.mode == "append" else
