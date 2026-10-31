@@ -73,6 +73,9 @@ api_export/
 # 锁稿核验（拿到剧本要拆分镜时先跑）：时长撑不撑得住、锁定清单齐不齐
 python3 scripts/check_handoff.py 稿子.txt --shots 130 --sec 15
 
+# 节拍密度（内容够不够厚？爽点密不密？）
+python3 scripts/check_beat_density.py 稿子.txt
+
 # 体检（结构、时间码、空段、粘连、重复、跨镜引用）
 python3 scripts/audit_storyboard.py 稿子.txt
 
@@ -112,6 +115,7 @@ WorkBuddy → 设置 → 技能 → 添加本地技能 → 选 ai-drama-storyboa
 ```
 剧本定稿
   ↓  check_handoff.py --shots N --sec M      ← 锁稿核验（时长撑不撑得住？清单齐不齐？）
+  ↓  check_beat_density.py                   ← 节拍密度（内容够厚吗？爽点密吗？）
   ↓  交付锁稿清单 + 不可改动项清单
 分镜稿
   ↓  audit_storyboard.py                      ← 体检（空段/粘连/重复/跨镜引用）
@@ -133,9 +137,12 @@ WorkBuddy → 设置 → 技能 → 添加本地技能 → 选 ai-drama-storyboa
 ai-drama-storyboard/
 ├── SKILL.md                          核心方法论（九条铁律）
 ├── references/
+│   ├── beat_density.md                节拍密度控制（爽不起来的根因）★
 │   ├── handoff_spec.md               剧本→分镜交接规范（锁稿核验）★
 │   ├── script_review.md              分镜稿审核与原格式修订规范 ★
 │   ├── spatial_anchor.md             空间方向三层锚定（内外防穿帮）★
+│   ├── visual_style.md               视觉风格库（52 风格 + 四视角场景图）★
+│   ├── short_prompts.md              三份短指令模板（连续性/违规/后缀）
 │   ├── api_compat.md                 各平台能力矩阵与通用基线 ★
 │   ├── field_spec.md                 各栏位写法规范
 │   ├── pitfalls.md                   踩坑详解（症状→根因→修法）
@@ -143,6 +150,7 @@ ai-drama-storyboard/
 ├── scripts/
 │   ├── shotparse.py                  解析/写回公共库
 │   ├── check_handoff.py              锁稿核验器 ★
+│   ├── check_beat_density.py         节拍密度体检器 ★
 │   ├── audit_storyboard.py           体检器（10 项检查）
 │   ├── audit_repetition.py           语义重复检测器 ★
 │   ├── audit_spatial.py              空间方向检测器 ★
@@ -150,14 +158,12 @@ ai-drama-storyboard/
 │   ├── build_feed_prompts.py         投喂栏生成器
 │   ├── export_for_api.py             多平台适配导出器 ★
 │   ├── selftest.py / e2e_test.py     回归与端到端测试
-└── assets/
-    ├── sample_shot_block.txt         单镜完整样例（可照抄）
-    └── 剧本分镜审核指令_原文.txt       审核指令原文（可直接复制使用）
+└── assets/                            各指令原文 + 单镜样例（可直接复制使用）
 ```
 
 ---
 
-## 十一条铁律（摘要）
+## 十三条铁律（摘要）
 
 0. **通用性优先** —— 段长 4–10 秒、9:16、参考图 ≤5、负向写两遍、台词加引号
 1. **每镜自足** —— 只写本镜看得见的内容，禁止跨镜指代
@@ -170,6 +176,8 @@ ai-drama-storyboard/
 8. **交接前先锁稿** —— 时长撑不撑得住？分镜阶段无创作权限
 9. **审核只改有依据的问题，且不改原格式** —— 最小文字修改，格式全保留
 10. **空间方向要三层锚定** —— 参照物成对 + 动词带方向 + 门朝向声明
+11. **密度要有下限** —— 每 45–75 秒一次有效变化，先补密度再调爽点
+12. **风格要写全四要素** —— 画风 + 材质 + 光线 + 色调 + 构图
 
 完整解释见 `SKILL.md`。
 
