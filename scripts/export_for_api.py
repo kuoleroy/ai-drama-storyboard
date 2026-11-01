@@ -371,16 +371,30 @@ def build_prompt(shot_meta, group, platform):
                     " ".join(dlg))
     prompt_core = "\n".join(x for x in core if x).strip()
 
-    # 核心层超长时按比例压缩（保画面，优先砍光线与次要段）
+    # 核心层超长时：固定项优先保，运镜画面段逐段压缩（地板 35 字），绝不整段丢弃
     if len(prompt_core) > CORE_LIMIT:
-        keep = []
-        acc = 0
+        fixed, cam_lines = [], []
         for ln in prompt_core.split("\n"):
-            if acc + len(ln) > CORE_LIMIT and keep:
-                continue
-            keep.append(ln)
-            acc += len(ln)
-        prompt_core = "\n".join(keep)
+            if ln.startswith("风格：") or ln.startswith("人物：") \
+               or ln.startswith("光线：") or ln.startswith("台词"):
+                fixed.append(ln)
+            else:
+                cam_lines.append(ln)
+        fixed_len = sum(len(x) for x in fixed)
+        # 固定项已吃满预算时，把台词移出核心层（唇形仍由平台原生音频保障）
+        if fixed_len > CORE_LIMIT - 40:
+            fixed = [x for x in fixed if not x.startswith("台词")]
+            fixed_len = sum(len(x) for x in fixed)
+        budget = max(CORE_LIMIT - fixed_len, 40)
+        total_cam = sum(len(x) for x in cam_lines) or 1
+        new_cam = []
+        for ln in cam_lines:
+            if total_cam <= budget:
+                new_cam.append(ln)
+            else:
+                share = max(int(budget * len(ln) / total_cam), 35)
+                new_cam.append(compress(ln, share))
+        prompt_core = "\n".join(fixed + new_cam).strip()
 
     # ---------- 详情层 ----------
     detail = []
@@ -395,6 +409,10 @@ def build_prompt(shot_meta, group, platform):
     detail.append("要求：镜头始终跟随主体运动，主体停下时镜头才停；"
                   "每段构图与景别互不相同；"
                   "不出现上述人物以外的人物与物件；画面内不生成任何文字。")
+    # 分镜专属生成约束（如"运镜2客人手中只能有购物袋、严禁出现伞"等分段否定）必须带进每段
+    gen_rule = shot_meta.get("gen_rule_line") or ""
+    if gen_rule:
+        detail.append("本镜生成约束：" + gen_rule)
     detail.append("避免：" + NEGATIVE)
     prompt_detail = "\n".join(detail)
 
@@ -426,6 +444,8 @@ def shot_meta(block, global_style=None):
     # 空间锚定与道具状态（连续性层的关键信息）
     anchor_line = field(body, "【空间锚定】")
     prop_line = field(body, "【道具状态】")
+    # 分镜专属生成约束（含"严禁出现伞"等分段否定），必须带到每段 detail 层
+    gen_rule_line = field(body, "【生成约束】")
 
     # 台词（正文里的"角色（提示）：台词"格式）
     dlg = []
@@ -469,6 +489,7 @@ def shot_meta(block, global_style=None):
         "light_line": light_line,
         "anchor_line": anchor_line,
         "prop_line": prop_line,
+        "gen_rule_line": gen_rule_line,
         "dialogue": dd,
         "refs": ref_list,
         "char_refs": char_refs,
