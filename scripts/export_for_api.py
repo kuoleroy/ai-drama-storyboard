@@ -6,7 +6,14 @@ export_for_api.py —— 把分镜稿编译成各平台可直接调用的投喂�
 用法：
     python3 export_for_api.py <分镜稿.txt> --platform <平台> [-o 输出目录]
     python3 export_for_api.py <分镜稿.txt> --platform all -o 输出目录
+    python3 export_for_api.py <分镜稿.txt> --platform all --continuity keyframes -o 输出目录
     python3 export_for_api.py <分镜稿.txt> --check          # 只做通用性体检
+
+连续性模式（--continuity）：
+    first      默认。同场戏内每段用上一段末帧作首帧，跨场断开；最快，零额外出图
+    keyframes  关键帧先行：先批量出每镜 n+1 张关键帧静帧，再逐段用相邻两张作首/末帧；
+               中间运动交给模型；仅支持末帧的平台（Seedance 2.0 两张图模式）可用
+    off        不做首帧/末帧控制
 
 平台 key：
     kling      可灵 2.6 / o1        5/10s，9:16，参考图≤7
@@ -73,6 +80,7 @@ PLATFORMS = {
         "resolution": "1080p",
         "max_refs": 5,
         "audio_native": True,
+        "supports_last_frame": True,
         "notes": "2.0 支持 4-15s，2.5 支持 4-30s；支持 return_last_frame 末帧续写",
     },
     "veo": {
@@ -348,11 +356,14 @@ def build_prompt(shot_meta, group, platform):
     style_short = compress(style.replace("风格：", "").split("。")[0], 34)
     if style_short:
         core.append(style_short + "。")
-    # 场景与人物
+    # 场景、人物与道具清单
     scene = shot_meta.get("scene_line") or ""
     people = shot_meta.get("people_line") or ""
+    props_list = shot_meta.get("props_list_line") or ""
     if people:
         core.append(people)
+    if props_list:
+        core.append(props_list)
     # 逐段画面描述（画面 + 镜头，精简）
     for s in group["parts"]:
         visual, camera = strip_meta(s.get("body"))
@@ -376,7 +387,7 @@ def build_prompt(shot_meta, group, platform):
         fixed, cam_lines = [], []
         for ln in prompt_core.split("\n"):
             if ln.startswith("风格：") or ln.startswith("人物：") \
-               or ln.startswith("光线：") or ln.startswith("台词"):
+               or ln.startswith("道具：") or ln.startswith("光线：") or ln.startswith("台词"):
                 fixed.append(ln)
             else:
                 cam_lines.append(ln)
@@ -424,6 +435,7 @@ def shot_meta(block, global_style=None):
     body = block[1:]
     people = field(body, "【人物】")
     scene = field(body, "【场景】")
+    props_list = field(body, "【道具】")
     style = field(body, "风格：") or field(body, "风格")
     light = field(body, "【光线】")
 
@@ -462,28 +474,37 @@ def shot_meta(block, global_style=None):
             seen.add(x)
             dd.append(x)
 
-    # 参考图：只取角色三视图与场景图（道具走 AI 自动生成，不进参考图）
+    # 参考图：角色三视图 + 关键道具图 + 场景图
+    # 超平台上限时按此优先级截断：角色 > 关键道具 > 场景
     refs = field(body, "【参考图】") + " " + field(body, "【参考图·角色】") + " " \
-        + field(body, "【参考图·场景】")
-    char_refs, scene_refs = [], []
+        + field(body, "【参考图·场景】") + " " + field(body, "【参考图·道具】")
+    char_refs, prop_refs, scene_refs = [], [], []
     for m in re.findall(r"[一-龥A-Za-z0-9_\-·]{2,24}\.(?:png|jpg|jpeg|webp|bmp|gif)", refs):
         if "场景" in m or "场景图" in m:
             if m not in scene_refs:
                 scene_refs.append(m)
+        elif "道具" in m or "道具图" in m:
+            if m not in prop_refs:
+                prop_refs.append(m)
         elif m not in char_refs:
             char_refs.append(m)
     if not char_refs:
-        for m in re.findall(r"[一-龥A-Za-z0-9_\-·]{2,20}_三视图", refs):
+        for m in re.findall(r"[一-龥A-Za-z0-9_\-·]{1,20}_三视图", refs):
             if m not in char_refs:
                 char_refs.append(m)
+    if not prop_refs:
+        for m in re.findall(r"[一-龥A-Za-z0-9_\-·]{1,20}_道具图", refs):
+            if m not in prop_refs:
+                prop_refs.append(m)
     if not scene_refs:
-        for m in re.findall(r"[一-龥A-Za-z0-9_\-·]{2,20}_场景图", refs):
+        for m in re.findall(r"[一-龥A-Za-z0-9_\-·]{1,20}_场景图", refs):
             if m not in scene_refs:
                 scene_refs.append(m)
-    ref_list = char_refs + scene_refs
+    ref_list = char_refs + prop_refs + scene_refs
 
     return {
         "people_line": ("人物：" + people) if people else "",
+        "props_list_line": ("道具：" + props_list) if props_list else "",
         "scene_line": scene_line,
         "style_line": style_line,
         "light_line": light_line,
@@ -493,12 +514,19 @@ def shot_meta(block, global_style=None):
         "dialogue": dd,
         "refs": ref_list,
         "char_refs": char_refs,
+        "prop_refs": prop_refs,
         "scene_refs": scene_refs,
     }
 
 
-def platform_params(platform, prompt, negative, duration, ref_list, seed):
-    """生成该平台的参数字典（抹平字段名差异）。"""
+def platform_params(platform, prompt, negative, duration, ref_list, seed,
+                    first_frame=None, last_frame=None):
+    """生成该平台的参数字典（抹平字段名差异）。
+
+    first_frame / last_frame 为约定路径（见 --frames-dir）。
+    首帧字段名按平台抹平：可灵 image / Seedance metadata.image / 其余 first_frame_image。
+    末帧仅对声明 supports_last_frame 的平台输出（目前是 Seedance 2.0 两张图模式）。
+    """
     key = platform["_key"]
     p = {
         "prompt": prompt,
@@ -542,6 +570,17 @@ def platform_params(platform, prompt, negative, duration, ref_list, seed):
         p["resolution"] = platform["resolution"]
     if ref_list and "refer_image" not in p:
         p["reference_images"] = ref_list
+
+    # 首帧 / 末帧：按平台字段名写入
+    if first_frame:
+        if key == "kling":
+            p["image"] = first_frame
+        elif key == "seedance":
+            p.setdefault("metadata", {})["image"] = first_frame
+        else:
+            p["first_frame_image"] = first_frame
+    if last_frame and platform.get("supports_last_frame"):
+        p["last_frame_image"] = last_frame
     return p
 
 
@@ -555,7 +594,7 @@ def find_global_style(lines):
     return ""
 
 
-def export(src, platform_keys, outdir):
+def export(src, platform_keys, outdir, continuity="first", frames_dir="frames"):
     lines, had_bom, newline = read_lines(src)
     shots = split_shots(lines)
     if not shots:
@@ -586,25 +625,51 @@ def export(src, platform_keys, outdir):
         total_seg = 0
         total_dur = 0
         prev_seg_id = None      # 首帧续写链：上一段的末帧 → 下一段的首帧
+        prev_scene = None       # 跨场判断：换场时断开续写链，避免继承上一场
         last_frame_of = {}     # shot_no -> 该段末帧应保存的文件名
 
         for num, sec, block in shots:
             meta = shot_meta(block, global_style)
+            cur_scene = meta.get("scene_line") or ""
+            same_scene = (prev_scene is not None and cur_scene == prev_scene)
             segs, _ = parse_segments(block[1:])
             groups = regroup_segments(segs, plat)
             for gi, g in enumerate(groups):
                 total_seg += 1
                 total_dur += g["dur"]
+                seg_id = "%03d-%02d" % (num, gi + 1)
                 core, detail = build_prompt(meta, g, plat)
+                if continuity == "keyframes" and plat.get("supports_last_frame"):
+                    detail += ("\n首尾帧：起止画面已由首帧/末帧给定，"
+                               "只补中间运动，不重新构图、不改起止内容。")
                 prompt_full = core + "\n" + detail
                 refs = meta["refs"][:plat["max_refs"]]
+
+                # 三种连续性模式：
+                #   first（默认，快）   同场戏取上一段末帧作首帧；跨场断开
+                #   keyframes（首尾帧） 先批量出关键帧静帧，每段用相邻两张
+                #   off               不做帧控制
+                first_frame = None
+                last_frame = None
+                chain_src = None
+                if continuity == "keyframes":
+                    first_frame = "%s/shot%03d_k%02d.png" % (frames_dir, num, gi)
+                    if plat.get("supports_last_frame"):
+                        last_frame = "%s/shot%03d_k%02d.png" % (frames_dir, num, gi + 1)
+                elif continuity == "first":
+                    chain_src = prev_seg_id if (gi > 0 or same_scene) else None
+                    if chain_src:
+                        first_frame = "%s/%s_last.png" % (frames_dir, chain_src)
+
                 params = platform_params(plat, prompt_full, NEGATIVE, g["dur"], refs,
-                                         seed=1000 + num * 10 + gi)
+                                         seed=1000 + num * 10 + gi,
+                                         first_frame=first_frame, last_frame=last_frame)
                 # 另给一份"只含核心层"的参数（模型对长提示词敏感时用）
                 params_min = platform_params(plat, core, NEGATIVE, g["dur"], refs,
-                                             seed=1000 + num * 10 + gi)
+                                             seed=1000 + num * 10 + gi,
+                                             first_frame=first_frame, last_frame=last_frame)
                 item = {
-                    "id": "%03d-%02d" % (num, gi + 1),
+                    "id": seg_id,
                     "shot": num,
                     "shot_seconds": sec,
                     "seg_index": gi + 1,
@@ -617,7 +682,9 @@ def export(src, platform_keys, outdir):
                         for s in g["parts"]],
                     "dialogue": meta["dialogue"],
                     "reference_images": refs,
-                    "first_frame_from": prev_seg_id,   # 首帧续写：取上一段末帧
+                    "first_frame_from": chain_src,
+                    "first_frame_image": first_frame,
+                    "last_frame_image": last_frame,
                     "params": params,
                     "params_minimal": params_min,
                     "prompt_core": core,
@@ -641,6 +708,7 @@ def export(src, platform_keys, outdir):
                     " ｜ 核心%d字/全量%d字\n%s"
                     % (item["id"], num, gi + 1, len(groups), item["timecode"],
                        plat["name"], g["dur"], len(core), len(prompt_full), core))
+            prev_scene = cur_scene
 
         manifest["total_segments"] = total_seg
         manifest["total_seconds"] = total_dur
@@ -679,16 +747,43 @@ def export(src, platform_keys, outdir):
                 % (over, "/".join(str(d) for d in plat["durations"][:6])))
         else:
             manifest["duration_note"] = "总时长与原稿一致，档位精确匹配。"
+        how = {
+            "first": ("按 segments 顺序生成；同场戏内每段用上一段末帧作首帧，跨场断开。"
+                      "生成后把末帧保存为 frames/<段id>_last.png，下一段已按此约定填好。"),
+            "keyframes": ("先批量生成每镜的关键帧静帧（frames/shotNNN_kNN.png，"
+                          "数量 = 该平台切分后的段数 + 1），"
+                          "再逐段用相邻两张作首/末帧生成视频；中间运动交给模型，不重新构图。"
+                          "仅声明 supports_last_frame 的平台（Seedance 2.0 两张图模式）可用末帧。"),
+            "off": "不做首帧/末帧控制。",
+        }.get(continuity, "")
         manifest["continuity_chain"] = {
-            "how": "按 segments 顺序生成；每段生成后回传末帧，作为下一段的 first_frame_image。"
-                   "首帧续写是逐镜流水线里唯一可靠的『记忆』，同场戏必用，跨场可省略。",
+            "mode": continuity,
+            "how": how,
             "first_frame_of": {s["id"]: s.get("first_frame_from") for s in manifest["segments"]},
+            "frame_paths": {s["id"]: {"first": s.get("first_frame_image"),
+                                      "last": s.get("last_frame_image")}
+                            for s in manifest["segments"]},
             "save_last_frame_of": last_frame_of,
         }
+        if continuity == "keyframes":
+            kf = {}
+            for s in manifest["segments"]:
+                if s["seg_index"] == 1:
+                    n = s["seg_count"]
+                    kf["shot%03d" % s["shot"]] = [
+                        "%s/shot%03d_k%02d.png" % (frames_dir, s["shot"], i)
+                        for i in range(n + 1)]
+            manifest["continuity_chain"]["keyframes_per_shot"] = kf
+            if not plat.get("supports_last_frame"):
+                manifest["continuity_chain"]["last_frame_unsupported"] = (
+                    "该平台不支持末帧，已退化为只用首帧关键帧。")
         manifest["usage"] = {
             "1": "按 segments 顺序逐段生成",
             "2": "每段用 item.params 发起调用，prompt 字段即提示词",
-            "3": "生成后导出末帧，赋给下一段的 first_frame_image",
+            "3": ("先用 continuity_chain.keyframes_per_shot 批量生成关键帧静帧，再逐段生成。"
+                  if continuity == "keyframes" else
+                  "生成后把末帧保存为 frames/<段id>_last.png。" if continuity == "first" else
+                  "无。"),
             "4": "参考图按 item.reference_images 传，文件名需与素材目录一致",
             "5": "同 seed 重跑可复现；换 seed 可换一版试试",
         }
@@ -752,6 +847,11 @@ def main():
     ap.add_argument("--platform", default="generic",
                     help="平台 key，或 all（导出全部）")
     ap.add_argument("-o", "--output", default="./api_export")
+    ap.add_argument("--continuity", choices=["off", "first", "keyframes"], default="first",
+                    help="连续性模式：first 首帧续写（默认，快）/ "
+                         "keyframes 关键帧先行（首尾帧，先出静帧）/ off 不用")
+    ap.add_argument("--frames-dir", default="frames",
+                    help="首帧/关键帧的约定目录（相对各平台输出目录），默认 frames")
     ap.add_argument("--check", action="store_true", help="只做通用性体检")
     args = ap.parse_args()
 
@@ -771,7 +871,7 @@ def main():
                 print("未知平台: %s（可用: %s）" % (k, ", ".join(PLATFORMS.keys())))
                 return 2
     os.makedirs(args.output, exist_ok=True)
-    return export(args.src, keys, args.output)
+    return export(args.src, keys, args.output, args.continuity, args.frames_dir)
 
 
 if __name__ == "__main__":

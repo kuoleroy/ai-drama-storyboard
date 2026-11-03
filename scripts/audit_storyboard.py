@@ -149,7 +149,7 @@ def audit(path):
         # 9. 纸面可读文字（只在画面描述行里找，不看汇总栏/表演提示/生成约束）
         for l in body:
             ls = l.strip()
-            if ls.startswith(("【台词与声音】", "【表演提示", "【生成约束】", "【本镜", "【参考图", "【道具状态】")):
+            if ls.startswith(("【台词与声音】", "【表演提示", "【生成约束】", "【本镜", "【参考图", "【道具】", "【道具状态】")):
                 continue
             if ls.startswith("（") and ls.endswith("）"):
                 continue

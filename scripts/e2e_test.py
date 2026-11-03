@@ -109,13 +109,17 @@ def main():
     check("运镜正文不减少", len(nonempty_a) >= len(nonempty_b),
           "原 %d → 现 %d" % (len(nonempty_b), len(nonempty_a)))
 
-    # 编码保持
-    raw = open(work, "rb").read()
-    check("UTF-8 BOM 保持", raw[:3] == b"\xef\xbb\xbf")
+    # 编码保持：输入有 BOM → 输出有；输入无 BOM → 输出无
+    raw_in = open(src, "rb").read()
+    raw_out = open(work, "rb").read()
+    bom_in = raw_in[:3] == b"\xef\xbb\xbf"
+    bom_out = raw_out[:3] == b"\xef\xbb\xbf"
+    check("UTF-8 BOM 保持", bom_in == bom_out,
+          "输入%sBOM → 输出%sBOM" % ("有" if bom_in else "无", "有" if bom_out else "无"))
 
     # 投喂栏齐全（separate 模式会同时输出原正文里的同名栏，故按 ≥ 判定，
     # 并额外确认每镜都有一份新增栏）
-    for tag in ("【人物】", "【场景】", "【道具状态】", "【本镜可见人物】"):
+    for tag in ("【人物】", "【场景】", "【道具】", "【道具状态】", "【本镜可见人物】"):
         n = feedtext.count(tag)
         check("投喂版含 %s" % tag, n >= ta, "%d 条（至少 %d）" % (n, ta))
     # 原正文未被投喂栏替换（若原稿已有同类栏，生成器会跳过新增，故只断言不小于原有数）

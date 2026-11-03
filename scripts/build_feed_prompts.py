@@ -13,7 +13,7 @@ build_feed_prompts.py —— 把分镜稿编译成"每镜自足"的可投喂文�
 核心原则（决定了无状态 API 的成败）：
   1. 每镜自足 —— 只写本镜看得见的内容，禁止出现"上一镜/第NNN镜/承接"
   2. 绝对表述 —— 地点、时段、人物、道具状态全部写绝对值，不写"同上/沿用"
-  3. 外观放权、状态锁死 —— 道具外观交给 AI，锁的只是开合/持有者/位置
+  3. 关键道具锁外观、状态锁死 —— 关键道具进参考图，普通道具放权；锁的只是开合/持有者/位置
   4. 纸面文字模糊化 —— 关键信息由台词交付，画面只保留"有字迹/被划掉"的关系
   5. 段内自足 —— 每段带主体位移与镜头跟随，避免"只转镜头、人不动"
 """
@@ -43,7 +43,7 @@ PER_SHOT_RULES = [
     "镜头必须跟随该位移运动：主体走，镜头跟；主体停，镜头才停；不做无动机的推拉摇移。",
     "不出现【人物】名单以外的人物与物件；手部不穿模、不多指、不形变。",
     "纸面文字一律不要求清晰可辨，只保留「有字迹／被划掉／被压住」的关系；需要逐字正确的字句一律为后期合成，画面内不生成任何文字。",
-    "道具外观由 AI 自由发挥，但位置、数量、开合状态与持有者必须与【道具状态】一致。",
+    "关键道具的外观以参考图为准，普通道具由 AI 自由发挥；位置、数量、开合状态与持有者必须与【道具状态】一致。",
 ]
 
 # 道具状态词典：道具名 → 状态词（只锁不变量）
@@ -68,6 +68,23 @@ PROP_KWS = [
     "磁带", "卡带", "信封", "录音机", "吊坠", "残铁", "金属圆片", "圆片",
     "饼干盒", "文件夹", "托盘", "登记表", "登记本", "纸牌", "留言卡",
 ]
+
+
+def prop_names_from_status(status_text):
+    """从【道具状态】栏里抽出纯道具名（去掉括号内的状态）。
+
+    【道具状态】红漆金属方盒（空盒，敞开）；带字迹的复印件（握在手里）
+      → ["红漆金属方盒", "带字迹的复印件"]
+    """
+    out = []
+    for part in re.split(r"[；;]", status_text or ""):
+        part = part.strip()
+        if not part:
+            continue
+        nm = re.split(r"[（(]", part)[0].strip()
+        if nm and nm not in out:
+            out.append(nm)
+    return out
 
 
 def prop_state(text):
@@ -182,17 +199,27 @@ def build_shot_block(num, sec, block, opts):
                                   else "、".join(all_names)))
     if not already("【场景】"):
         out.append("【场景】" + scene_line + (" ｜ 时段：" + "→".join(tm[:2]) if tm else ""))
+
+    # 道具（仅列表，不含状态）—— 与【人物】【场景】并列的独立栏
+    existing_prop = field(body, "【道具状态】")
+    existing_props = field(body, "【道具】")
+    prop_src = " ".join([start, end] + [l for l in body if l.startswith("运镜")])
+    ps = [] if existing_prop else prop_state(prop_src)
+    if existing_props:
+        if not already("【道具】"):
+            out.append("【道具】" + existing_props)
+    else:
+        names = prop_names_from_status(existing_prop) if existing_prop else [k for k, v in ps]
+        out.append("【道具】" + ("、".join(names) if names else "无关键道具"))
+
     if light and not already("【光线】"):
         out.append("【光线】" + light)
 
     # 道具状态：优先复用原文件已有的【道具状态】栏；否则从起始/结束状态里抽
-    existing_prop = field(body, "【道具状态】")
     if existing_prop:
         if not already("【道具状态】"):
             out.append("【道具状态】" + existing_prop)
     else:
-        prop_src = " ".join([start, end] + [l for l in body if l.startswith("运镜")])
-        ps = prop_state(prop_src)
         out.append("【道具状态】" + ("；".join("%s（%s）" % (k, v) for k, v in ps)
                                      if ps else "无关键道具"))
 
